@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+    <title>Web VR boilerplate</title>
+    <meta charset="utf-8">
+    <meta name="viewport"
+          content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0, shrink-to-fit=no">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes"/>
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+    <style>
+        body {
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            color: #fff;
+            margin: 0px;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        /* Position the button on the bottom of the page. */
+        #ui {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            font-family: 'Karla', sans-serif;
+            z-index: 1;
+        }
+
+        a#magic-window {
+            display: block;
+            color: white;
+            margin-top: 1em;
+        }
+    </style>
+</head>
+
+<body>
+<div id="ui">
+    <div id="vr-button"></div>
+    <a id="magic-window" href="#">Try it without a headset</a>
+</div>
+</body>
+
+<script>
+    /*
+     * Debug parameters.
+     */
+    WebVRConfig = {
+        /**
+         * webvr-polyfill configuration
+         */
+
+        // Forces availability of VR mode.
+        //FORCE_ENABLE_VR: true, // Default: false.
+        // Complementary filter coefficient. 0 for accelerometer, 1 for gyro.
+        //K_FILTER: 0.98, // Default: 0.98.
+        // How far into the future to predict during fast motion.
+        //PREDICTION_TIME_S: 0.040, // Default: 0.040 (in seconds).
+        // Flag to disable touch panner. In case you have your own touch controls
+        //TOUCH_PANNER_DISABLED: true, // Default: false.
+        // Enable yaw panning only, disabling roll and pitch. This can be useful for
+        // panoramas with nothing interesting above or below.
+        //YAW_ONLY: true, // Default: false.
+        // Enable the deprecated version of the API (navigator.getVRDevices).
+        //ENABLE_DEPRECATED_API: true, // Default: false.
+        // Scales the recommended buffer size reported by WebVR, which can improve
+        // performance. Making this very small can lower the effective resolution of
+        // your scene.
+        BUFFER_SCALE: 0.5, // default: 1.0
+        // Allow VRDisplay.submitFrame to change gl bindings, which is more
+        // efficient if the application code will re-bind it's resources on the
+        // next frame anyway.
+        // Dirty bindings include: gl.FRAMEBUFFER_BINDING, gl.CURRENT_PROGRAM,
+        // gl.ARRAY_BUFFER_BINDING, gl.ELEMENT_ARRAY_BUFFER_BINDING,
+        // and gl.TEXTURE_BINDING_2D for texture unit 0
+        // Warning: enabling this might lead to rendering issues.
+        //DIRTY_SUBMIT_FRAME_BINDINGS: true // default: false
+    };
+</script>
+
+<!--
+  A polyfill for Promises. Needed for IE and Edge.
+-->
+<script src="node_modules/es6-promise/dist/es6-promise.min.js"></script>
+
+<!--
+  three.js 3d library
+-->
+<script src="lib/three.js"></script>
+
+<!--
+  VRControls.js acquires positional information from connected VR devices and applies the transformations to a three.js camera object.
+-->
+<script src="node_modules/three/examples/js/controls/VRControls.js"></script>
+
+<!--
+  VREffect.js handles stereo camera setup and rendering.
+-->
+<script src="node_modules/three/examples/js/effects/VREffect.js"></script>
+
+<!--
+  A polyfill for WebVR using the Device{Motion,Orientation}Event API.
+-->
+<script src="node_modules/webvr-polyfill/build/webvr-polyfill.min.js"></script>
+
+<!--
+  A set of UI controls for entering VR mode.
+-->
+<script src="node_modules/webvr-ui/build/webvr-ui.min.js"></script>
+
+
+<!--
+  GLTF Loader
+-->
+<script src="lib/GLTFLoader.js"></script>
+
+<script>
+    // Last time the scene was rendered.
+    var lastRenderTime = 0;
+    // Currently active VRDisplay.
+    var vrDisplay;
+    // How big of a box to render.
+    var boxSize = 5;
+    // Various global THREE.Objects.
+    var scene;
+    var cube;
+    var controls;
+    var effect;
+    var camera;
+    // EnterVRButton for rendering enter/exit UI.
+    var vrButton;
+
+
+    function getEnvMap() {
+        var path = 'textures/cube/skybox/';
+        var format = '.jpg';
+        var urls = [
+            path + 'px' + format, path + 'nx' + format,
+            path + 'py' + format, path + 'ny' + format,
+            path + 'pz' + format, path + 'nz' + format
+        ];
+        var loader = new THREE.CubeTextureLoader();
+        loader.setCrossOrigin('anonymous');
+        var envMap = loader.load(urls);
+        envMap.format = THREE.RGBFormat;
+        return envMap;
+    }
+
+
+    function onLoad() {
+        // Setup three.js WebGL renderer. Note: Antialiasing is a big performance hit.
+        // Only enable it if you actually need to.
+        var renderer = new THREE.WebGLRenderer({antialias: false});
+        renderer.setPixelRatio(window.devicePixelRatio);
+
+        // Append the canvas element created by the renderer to document body element.
+        document.body.appendChild(renderer.domElement);
+
+        // Create a three.js scene.
+        scene = new THREE.Scene();
+
+        // Create a three.js camera.
+        var aspect = window.innerWidth / window.innerHeight;
+        camera = new THREE.PerspectiveCamera(75, aspect, 0.1, 10000);
+
+        controls = new THREE.VRControls(camera);
+        controls.standing = true;
+        // Apply VR stereo rendering to renderer.
+        effect = new THREE.VREffect(renderer);
+        effect.setSize(window.innerWidth, window.innerHeight);
+
+        light = new THREE.AmbientLight(0xffffff);
+        scene.add(light);
+
+        setupStage();
+
+        // Add a background.
+        function setupBackground() {
+            var loader = new THREE.TextureLoader();
+            loader.load('img/pano.jpg', function (texture) {
+                var geometry = new THREE.SphereGeometry(500, 160, 140);
+                var material = new THREE.MeshBasicMaterial({map: texture, side: THREE.DoubleSide});
+                var mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(0, controls.userHeight, -1);
+                mesh.rotation.set(0, -2.6, 0);
+                scene.add(mesh);
+
+                // For high end VR devices like Vive and Oculus, take into account the stage
+                // parameters provided.
+
+            });
+        }
+
+        setupBackground();
+
+        function addCart() {
+            var loader = new THREE.GLTFLoader();
+            loader.setCrossOrigin('anonymous');
+
+            var scale = 0.02;
+            var url = "../../models/gltf/cart/cart.gltf";
+            loader.load(url, function (data) {
+                gltf = data;
+                var object;
+                if (gltf.scene !== undefined) {
+                    object = gltf.scene; // default scene
+                } else if (gltf.scenes.length > 0) {
+                    object = gltf.scenes[0]; // other scene
+                }
+                object.position.set(3.5, -3, -6);
+                object.rotation.set(0, 2, 0);
+                object.scale.set(scale, scale, scale);
+
+                var animations = gltf.animations;
+                if (animations && animations.length) {
+                    mixer = new THREE.AnimationMixer(object);
+                    for (var i = 0; i < animations.length; i++) {
+                        var animation = animations[i];
+                        mixer.clipAction(animation).play();
+                    }
+                }
+
+                var envMap = getEnvMap();
+                object.traverse(function (node) {
+                    if (node.material) {
+                        node.material.envMap = envMap;
+                        node.material.needsUpdate = true;
+                    }
+                });
+                //scene.background = envMap;
+
+                scene.add(object);
+            });
+        }
+
+        addCart();
+
+
+        function addTable(position) {
+            var loader = new THREE.GLTFLoader();
+
+            var scale = 0.12;
+
+            var url = "../../models/gltf/dresser/scene.gltf";
+            loader.load(url, function (data) {
+                gltf = data;
+                var object;
+                if (gltf.scene !== undefined) {
+                    object = gltf.scene; // default scene
+                } else if (gltf.scenes.length > 0) {
+                    object = gltf.scenes[0]; // other scene
+                }
+                object.position.set(position.x, position.y, position.z);
+                object.rotation.set(0, -0.4, 0);
+                object.scale.set(scale, scale, scale);
+
+                var animations = gltf.animations;
+                if (animations && animations.length) {
+                    mixer = new THREE.AnimationMixer(object);
+                    for (var i = 0; i < animations.length; i++) {
+                        var animation = animations[i];
+                        mixer.clipAction(animation).play();
+                    }
+                }
+
+                var envMap = getEnvMap();
+                object.traverse(function (node) {
+                    if (node.material) {
+                        node.material.envMap = envMap;
+                        node.material.needsUpdate = true;
+                    }
+                });
+                //scene.background = envMap;
+
+                scene.add(object);
+            });
+        }
+
+        var tablePosition = {x: -2, y: -12, z: -22, h: 4, w: 12};
+        addTable(tablePosition);
+
+
+        function addShoe(name, scale, tablePosition, shift, rotation, j) {
+            var loader = new THREE.GLTFLoader();
+            loader.setCrossOrigin('anonymous');
+
+            loader.load("../../models/gltf/shoes/" + name + "/scene.gltf", function (data) {
+                gltf = data;
+                var object;
+                if (gltf.scene !== undefined) {
+                    object = gltf.scene; // default scene
+                } else if (gltf.scenes.length > 0) {
+                    object = gltf.scenes[0]; // other scene
+                }
+                object.position.set(tablePosition.x - tablePosition.w / 2 + 3.5 * j + shift.x,
+                    tablePosition.y + tablePosition.h  + shift.y + 1,
+                    tablePosition.z  + shift.z - 1.5);
+                object.rotation.set(rotation.x, rotation.y, rotation.x);
+                object.scale.set(scale, scale, scale);
+
+                var animations = gltf.animations;
+                if (animations && animations.length) {
+                    mixer = new THREE.AnimationMixer(object);
+                    for (var i = 0; i < animations.length; i++) {
+                        var animation = animations[i];
+                        mixer.clipAction(animation).play();
+                    }
+                }
+
+                var envMap = getEnvMap();
+                object.traverse(function (node) {
+                    if (node.material) {
+                        node.material.envMap = envMap;
+                        node.material.needsUpdate = true;
+                    }
+                });
+                //scene.background = envMap;
+
+                scene.add(object);
+            });
+        }
+
+
+
+        var noShift = {x:0, y:0, z:0};
+        var noRotation = {x:0, y:0, z:0};
+        addShoe("W04", 0.1, tablePosition,  {x:0, y:0, z:1.5}, noRotation, 1);
+        addShoe("M05", 0.009, tablePosition, {x:0, y:-0.8, z:1}, {x:0, y:1.5, z:0}, 0);
+        addShoe("S05", 0.25, tablePosition, {x:-0.5, y:+0.3, z:1.5}, {x:0, y:0, z:0}, 3);
+        addShoe("M03", 0.4, tablePosition, {x:-1, y:0, z:2.5}, {x:0, y:0.5, z:0}, 2);
+        addShoe("M02", 0.16, tablePosition, {x:-2, y:-0.6, z:0.5}, {x:0, y:0, z:0}, 4);
+
+
+
+        window.addEventListener('resize', onResize, true);
+        window.addEventListener('vrdisplaypresentchange', onResize, true);
+
+        // Initialize the WebVR UI.
+        var uiOptions = {
+            color: 'black',
+            background: 'white',
+            corners: 'square'
+        };
+        vrButton = new webvrui.EnterVRButton(renderer.domElement, uiOptions);
+        vrButton.on('exit', function () {
+            camera.quaternion.set(0, 0, 0, 1);
+            camera.position.set(0, controls.userHeight, 0);
+        });
+        vrButton.on('hide', function () {
+            document.getElementById('ui').style.display = 'none';
+        });
+        vrButton.on('show', function () {
+            document.getElementById('ui').style.display = 'inherit';
+        });
+        document.getElementById('vr-button').appendChild(vrButton.domElement);
+        document.getElementById('magic-window').addEventListener('click', function () {
+            vrButton.requestEnterFullscreen();
+        });
+    }
+
+
+    // Request animation frame loop function
+    function animate(timestamp) {
+        var delta = Math.min(timestamp - lastRenderTime, 500);
+        lastRenderTime = timestamp;
+
+        // Apply rotation to cube mesh
+        //cube.rotation.y += delta * 0.0006;
+
+        // Only update controls if we're presenting.
+        if (vrButton.isPresenting()) {
+            controls.update();
+        }
+        // Render the scene.
+        effect.render(scene, camera);
+
+        vrDisplay.requestAnimationFrame(animate);
+    }
+
+    function onResize(e) {
+        effect.setSize(window.innerWidth, window.innerHeight);
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+    }
+
+    // Get the HMD, and if we're dealing with something that specifies
+    // stageParameters, rearrange the scene.
+    function setupStage() {
+        navigator.getVRDisplays().then(function (displays) {
+            if (displays.length > 0) {
+                vrDisplay = displays[0];
+                if (vrDisplay.stageParameters) {
+                    setStageDimensions(vrDisplay.stageParameters);
+                }
+                vrDisplay.requestAnimationFrame(animate);
+            }
+        });
+    }
+
+    function setStageDimensions(stage) {
+    }
+
+    window.addEventListener('load', onLoad);
+
+</script>
+
+</html>
